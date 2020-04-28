@@ -5,7 +5,7 @@ import click
 import logging
 from datetime import datetime
 import timeit
-
+import time
 """
 Proposem:
 1.- Crear una màquina amb Snapshot de SP1 i li direm TSP1 (sysadmin)
@@ -46,16 +46,11 @@ class LoadQuerys(object):
     def close(self):
         self.conn.close()
 
-    def resetStats(self):
-        cursor = self.getCursor()
-        cursor.execute("select pg_stat_reset();")
-        logging.info("The stats has been reseted")
-
-    def executeStatements(self, filename, outfile=None):
+    def executeStatements(self, execution, filename, outfile=None):
         cursor = self.getCursor()
         output = []
         start = timeit.default_timer()
-        logging.info("Start execute statemets at %s" % str(datetime.fromtimestamp(start)))
+        logging.info("Start execute '%s' statemets at %s" % (execution, str(datetime.fromtimestamp(start))))
         with open(filename) as f:
             for line in f:
                 cursor.execute(line)
@@ -68,25 +63,47 @@ class LoadQuerys(object):
                     logging.error("Query without result: %s" % line)
 
         stop = timeit.default_timer()
-        logging.info("Stop execute statements at %s. Execution time %s"
-            % (str(datetime.fromtimestamp(stop)), str(round(stop-start,3)) + " ms"))
+        logging.info("Stop execute '%s' statements at %s. Execution time %s"
+            % (execution, str(datetime.fromtimestamp(stop)), str(round(stop-start,3)) + " ms"))
 
         if outfile:
-            outfile = outfile + str(stop) + ".txt"
+            outfile = outfile + str(datetime.fromtimestamp(stop)).strip() + ".txt"
             with open(outfile, "w") as f:
                 for i in output:
                     f.write(str(i))
 
+        return output
+
+
+    def runStatementsAndStats(self, filename):
+        #1.- Reinicar estadístiques de Postgres
+        self.executeStatements("Reset stats", 'reset_stats.sql')
+        #2.- Aplicar els statements de tot un dia extretes del pg_badger
+        self.executeStatements("Executant querys", filename)
+        #3.- Força l'actualització d'estadístiques
+        self.executeStatements("Executat analyze", "analyze.sql")
+        #4.- Extreure les estadístiques
+        i = 0
+        while len(self.executeStatements("Executant estadístiques", "get_stats.sql", "result_stats_")[0]) == 0:
+            i = i +1
+            time.sleep(10)
+            logging.info("Esperant a veure si s'updaten les estadístiques")
+            if i == 10:
+                self.executeStatements("Executat analyze", "analyze.sql")
+                i = 0
+
         return True
+
 
 @click.command()
 @click.option('--database', '-d')
 @click.option('--dbuser', '-u')
 @click.option('--password', '-P')
-@click.option('--port', '-p')
+@click.option('--port', '-p', default=5432)
 @click.option('--host', '-h', default='localhost')
 @click.option('--filename', '-f', default='statements20200429.sql')
-def main(database, dbuser, password, port, host, filename):
+@click.option('--filename_dba', '-a')
+def main(database, dbuser, password, port, host, filename, filename_dba):
     logging.basicConfig(filename='loadquerys.log', level=logging.INFO)
     config = {
         'host': host,
@@ -96,19 +113,21 @@ def main(database, dbuser, password, port, host, filename):
         'port': port
     }
     lq = LoadQuerys(config)
-    lq.getCursor() 
-    #1.- Reinicar estadístiques de Postgres
-    lq.resetStats()
-    #2.- Aplicar els statements de tot un dia extretes del pg_badger
-    lq.executeStatements(filename)
-    #3.- Força l'actualització d'estadístiques
-    lq.executeStatements("analyze.sql")
-    sleep(5)
-    #4.- Extreure les estadístiques
-    lq.executeStatements("get_stats.sql", "result_stats_")
-    #5.- Pujar el fitxer algun lloc
+    lq.getCursor()
+    #pg_stats_statements
+    # Executem sql simulació càrrega i guardem stats
+    lq.runStatementsAndStats(filename)
 
-    #6.- Tancar connexió
+    if filename_dba:
+        # Apliquem les modificacions
+        lq.executeStatements("Executant modificacions DBA", filename_dba)
+        # Tornem a fer el proces
+        lq.runStatementsAndStats(filename)
+
+    #Pugem els fitxers de stats algun lloc
+
+
+    #Tancar connexió
     lq.close()
 
 if __name__ == '__main__':
