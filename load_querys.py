@@ -3,7 +3,7 @@
 import psycopg2
 import click
 import logging
-import datetime
+from datetime import datetime
 import timeit
 
 """
@@ -33,35 +33,49 @@ p. ex: python load_querys.py -d somenergia -u user -P password -h localhost
 """
 class LoadQuerys(object):
     conn = None
-    logger = None
 
     def __init__(self, params):
-        self.logger = logging.getLogger('LoadQuerys')
-
         try:
             self.conn = psycopg2.connect(**params)
         except:
-            self.logger.error('I am unable to connect to the database')
+            logging.error('I am unable to connect to the database')
         
     def getCursor(self):
         return self.conn.cursor()
 
+    def close(self):
+        self.conn.close()
+
     def resetStats(self):
         cursor = self.getCursor()
         cursor.execute("select pg_stat_reset();")
-        self.logger.info("The stats has been reseted")
+        logging.info("The stats has been reseted")
 
-    def executeStatements(self, filename):
+    def executeStatements(self, filename, outfile=None):
         cursor = self.getCursor()
+        output = []
         start = timeit.default_timer()
-        self.logger.info("Start execute statemets at %s" % str(start))
+        logging.info("Start execute statemets at %s" % str(datetime.fromtimestamp(start)))
         with open(filename) as f:
-           for line in f:
+            for line in f:
+                cursor.execute(line)
                 #TODO: Some parsing actions when we know file format
-               cursor.execute(f)
+                try:
+                    response = cursor.fetchall()
+                    if outfile:
+                        output.append(response)
+                except psycopg2.ProgrammingError:
+                    logging.error("Query without result: %s" % line)
+
         stop = timeit.default_timer()
-        self.logger.info("Start execute statements at %s. Execution time %s"
-            % (str(stop), str(stop-start)))
+        logging.info("Stop execute statements at %s. Execution time %s"
+            % (str(datetime.fromtimestamp(stop)), str(round(stop-start,3)) + " ms"))
+
+        if outfile:
+            outfile = outfile + str(stop) + ".txt"
+            with open(outfile, "w") as f:
+                for i in output:
+                    f.write(str(i))
 
         return True
 
@@ -73,6 +87,7 @@ class LoadQuerys(object):
 @click.option('--host', '-h', default='localhost')
 @click.option('--filename', '-f', default='statements20200429.sql')
 def main(database, dbuser, password, port, host, filename):
+    logging.basicConfig(filename='loadquerys.log', level=logging.INFO)
     config = {
         'host': host,
         'database': database,
@@ -86,8 +101,15 @@ def main(database, dbuser, password, port, host, filename):
     lq.resetStats()
     #2.- Aplicar els statements de tot un dia extretes del pg_badger
     lq.executeStatements(filename)
-    #3.- Extreure les estadístiques i enviar-es/guardels fora
+    #3.- Força l'actualització d'estadístiques
+    lq.executeStatements("analyze.sql")
+    sleep(5)
+    #4.- Extreure les estadístiques
+    lq.executeStatements("get_stats.sql", "result_stats_")
+    #5.- Pujar el fitxer algun lloc
 
+    #6.- Tancar connexió
+    lq.close()
 
 if __name__ == '__main__':
     main()
