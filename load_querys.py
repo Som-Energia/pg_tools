@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 import psycopg2
 import click
+import logging
+import datetime
+import timeit
 
 """
 Proposem:
@@ -30,13 +33,15 @@ p. ex: python load_querys.py -d somenergia -u user -P password -h localhost
 """
 class LoadQuerys(object):
     conn = None
-    params = None
+    logger = None
 
     def __init__(self, params):
+        self.logger = logging.getLogger('LoadQuerys')
+
         try:
             self.conn = psycopg2.connect(**params)
         except:
-            print "I am unable to connect to the database"
+            self.logger.error('I am unable to connect to the database')
         
     def getCursor(self):
         return self.conn.cursor()
@@ -44,9 +49,21 @@ class LoadQuerys(object):
     def resetStats(self):
         cursor = self.getCursor()
         cursor.execute("select pg_stat_reset();")
+        self.logger.info("The stats has been reseted")
 
     def executeStatements(self, filename):
-        
+        cursor = self.getCursor()
+        start = timeit.default_timer()
+        self.logger.info("Start execute statemets at %s" % str(start))
+        with open(filename) as f:
+           for line in f:
+                #TODO: Some parsing actions when we know file format
+               cursor.execute(f)
+        stop = timeit.default_timer()
+        self.logger.info("Start execute statements at %s. Execution time %s"
+            % (str(stop), str(stop-start)))
+
+        return True
 
 @click.command()
 @click.option('--database', '-d')
