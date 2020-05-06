@@ -1,11 +1,13 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 import psycopg2
 import click
 import logging
 from datetime import datetime
 import timeit
 import time
+import emili
+
 """
 Proposem:
 1.- Crear una màquina amb Snapshot de SP1 i li direm TSP1 (sysadmin)
@@ -30,13 +32,19 @@ Un altre script (o manualment de moment)
 Mode d'execució:
 python load_querys.py -d NOM_BASEDADES -u USUARI -P PASSWORD [ -h SERVIDOR ] [-p PORT]
 p. ex: python load_querys.py -d somenergia -u user -P password -h localhost
+
+Per parsejar el log de postgres, fer servir el parse_querys.py
+python parse_querys.py -l postgresql-2020-04-23_000000.log
 """
+
 class LoadQuerys(object):
     conn = None
+    text_mail = u""
 
     def __init__(self, params):
         try:
             self.conn = psycopg2.connect(**params)
+            self.conn.cursor()
         except:
             logging.error('I am unable to connect to the database')
         
@@ -47,12 +55,20 @@ class LoadQuerys(object):
         self.conn.close()
 
     def executeStatements(self, execution, filename, outfile=None):
+        #if not outfile:
+        #    return True
         cursor = self.getCursor()
         output = []
         start = timeit.default_timer()
-        logging.info("Start execute '%s' statemets at %s" % (execution, str(datetime.fromtimestamp(start))))
+        text_time = str(datetime.fromtimestamp(start)).decode("utf-8")
+        logging.info("Start execute " + execution  + " statemets at " + text_time)
+        self.text_mail += "Start execute " + execution  + " statemets at " + text_time + "<br>\n"
         with open(filename) as f:
             for line in f:
+                # Skip comment lines
+                print(line)
+                if line.startswith("--"):
+                    continue
                 cursor.execute(line)
                 #TODO: Some parsing actions when we know file format
                 try:
@@ -63,19 +79,23 @@ class LoadQuerys(object):
                     logging.error("Query without result: %s" % line)
 
         stop = timeit.default_timer()
-        logging.info("Stop execute '%s' statements at %s. Execution time %s"
-            % (execution, str(datetime.fromtimestamp(stop)), str(round(stop-start,3)) + " ms"))
+        logging.info("Stop execute '%s' statements at %s. Execution time %s" % (execution,
+            datetime.fromtimestamp(stop).strftime("%Y-%m-%d %H:%M:%S.%f").decode("utf-8"),
+             str(round(stop-start,3)).decode("utf-8") + " s"))
+        self.text_mail += u"Stop execute '%s' statements at %s. Execution time %s <br>\n" % (execution,
+            datetime.fromtimestamp(stop).strftime("%Y-%m-%d %H:%M:%S.%f").decode("utf-8"),
+             str(round(stop-start,3)).decode("utf-8") + " s")
 
         if outfile:
-            outfile = outfile + str(datetime.fromtimestamp(stop)).strip() + ".txt"
+            outfile = outfile + str(datetime.fromtimestamp(stop)).replace(" ","_") + ".txt"
             with open(outfile, "w") as f:
                 for i in output:
                     f.write(str(i))
+                f.close()
+        return output, outfile
 
-        return output
 
-
-    def runStatementsAndStats(self, filename):
+    def runStatementsAndStats(self, filename, output_prefix):
         #1.- Reinicar estadístiques de Postgres
         self.executeStatements("Reset stats", 'reset_stats.sql')
         #2.- Aplicar els statements de tot un dia extretes del pg_badger
@@ -84,7 +104,10 @@ class LoadQuerys(object):
         self.executeStatements("Executat analyze", "analyze.sql")
         #4.- Extreure les estadístiques
         i = 0
-        while len(self.executeStatements("Executant estadístiques", "get_stats.sql", "result_stats_")[0]) == 0:
+        output = []
+        while len(output) == 0 :
+            output, outfilename = self.executeStatements(
+                "Executant estadístiques", "get_stats.sql", output_prefix )
             i = i +1
             time.sleep(10)
             logging.info("Esperant a veure si s'updaten les estadístiques")
@@ -92,7 +115,23 @@ class LoadQuerys(object):
                 self.executeStatements("Executat analyze", "analyze.sql")
                 i = 0
 
-        return True
+        return outfilename
+
+
+    def sendMail(self, first_stats, last_stats):
+        attachments = [first_stats]
+        if last_stats:
+            attachments.append(last_stats)
+        body = u"This is the result of your recent execution. Feel free to decide to apply the same recipes in production ;) <br>\n"
+        body += self.text_mail
+        emili.sendMail(
+            sender = 'sistemes@somenergia.coop',
+            to = ['oriol.piera@somenergia.coop'],
+            subject = u"pg_tools: Postgres Stats",
+            md = body,
+            attachments = attachments,
+            config = '../dbconfig.py',
+        )
 
 
 @click.command()
@@ -105,27 +144,28 @@ class LoadQuerys(object):
 @click.option('--filename_dba', '-a')
 def main(database, dbuser, password, port, host, filename, filename_dba):
     logging.basicConfig(filename='loadquerys.log', level=logging.INFO)
-    config = {
+    dbconfig = {
         'host': host,
         'database': database,
         'user': dbuser,
         'password': password,
         'port': port
     }
-    lq = LoadQuerys(config)
+    lq = LoadQuerys(dbconfig)
     lq.getCursor()
-    #pg_stats_statements
+
     # Executem sql simulació càrrega i guardem stats
-    lq.runStatementsAndStats(filename)
+    first_stats = lq.runStatementsAndStats(filename, 'before_stats_')
+    last_stats = None
 
     if filename_dba:
         # Apliquem les modificacions
         lq.executeStatements("Executant modificacions DBA", filename_dba)
         # Tornem a fer el proces
-        lq.runStatementsAndStats(filename)
+        last_stats = lq.runStatementsAndStats(filename, 'after_stats_')
 
     #Pugem els fitxers de stats algun lloc
-
+    lq.sendMail(first_stats, last_stats)
 
     #Tancar connexió
     lq.close()
