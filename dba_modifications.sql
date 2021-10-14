@@ -4,7 +4,7 @@ END TRANSACTION;
 --
 -- 
 -- VACUUM FULL;
-REINDEX table account_invoice;
+REINDEX index account_account_active_index;
 --
 --
 -- End of your operations
